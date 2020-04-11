@@ -14,6 +14,7 @@
 #include <linux/sched/signal.h>
 #include <linux/uio.h>
 #include <linux/miscdevice.h>
+#include <linux/namei.h>
 #include <linux/pagemap.h>
 #include <linux/file.h>
 #include <linux/slab.h>
@@ -21,6 +22,7 @@
 #include <linux/swap.h>
 #include <linux/splice.h>
 #include <linux/sched.h>
+#include <linux/freezer.h>
 
 MODULE_ALIAS_MISCDEV(FUSE_MINOR);
 MODULE_ALIAS("devname:fuse");
@@ -140,7 +142,7 @@ static struct fuse_req *__fuse_get_req(struct fuse_conn *fc, unsigned npages,
 
 	if (fuse_block_alloc(fc, for_background)) {
 		err = -EINTR;
-		if (wait_event_killable_exclusive(fc->blocked_waitq,
+		if (wait_event_freezable_exclusive(fc->blocked_waitq,
 				!fuse_block_alloc(fc, for_background)))
 			goto out;
 	}
@@ -200,7 +202,7 @@ static struct fuse_req *get_reserved_req(struct fuse_conn *fc,
 	struct fuse_file *ff = file->private_data;
 
 	do {
-		wait_event(fc->reserved_req_waitq, ff->reserved_req);
+		wait_event_freezable(fc->reserved_req_waitq, ff->reserved_req);
 		spin_lock(&fc->lock);
 		if (ff->reserved_req) {
 			req = ff->reserved_req;
@@ -249,7 +251,7 @@ struct fuse_req *fuse_get_req_nofail_nopages(struct fuse_conn *fc,
 	struct fuse_req *req;
 
 	atomic_inc(&fc->num_waiting);
-	wait_event(fc->blocked_waitq, fc->initialized);
+	wait_event_freezable(fc->blocked_waitq, fc->initialized);
 	/* Matches smp_wmb() in fuse_set_initialized() */
 	smp_rmb();
 	req = fuse_request_alloc(0);
@@ -417,8 +419,8 @@ static void request_wait_answer(struct fuse_conn *fc, struct fuse_req *req)
 	int err;
 
 	if (!fc->no_interrupt) {
-		/* Any signal may interrupt this */
-		err = wait_event_interruptible(req->waitq,
+		/* Any signal and freeze may interrupt this */
+		err = wait_event_freezable(req->waitq,
 					test_bit(FR_FINISHED, &req->flags));
 		if (!err)
 			return;
@@ -431,8 +433,7 @@ static void request_wait_answer(struct fuse_conn *fc, struct fuse_req *req)
 	}
 
 	if (!test_bit(FR_FORCE, &req->flags)) {
-		/* Only fatal signals may interrupt this */
-		err = wait_event_killable(req->waitq,
+		err = wait_event_freezable(req->waitq,
 					test_bit(FR_FINISHED, &req->flags));
 		if (!err)
 			return;
@@ -453,7 +454,9 @@ static void request_wait_answer(struct fuse_conn *fc, struct fuse_req *req)
 	 * Either request is already in userspace, or it was forced.
 	 * Wait it out.
 	 */
-	wait_event(req->waitq, test_bit(FR_FINISHED, &req->flags));
+	while (!test_bit(FR_FINISHED, &req->flags))
+		wait_event_freezable(req->waitq,
+				test_bit(FR_FINISHED, &req->flags));
 }
 
 static void __fuse_request_send(struct fuse_conn *fc, struct fuse_req *req)
@@ -1228,7 +1231,7 @@ static ssize_t fuse_dev_do_read(struct fuse_dev *fud, struct file *file,
 	    !request_pending(fiq))
 		goto err_unlock;
 
-	err = wait_event_interruptible_exclusive_locked(fiq->waitq,
+	err = wait_event_freezable_exclusive_locked(fiq->waitq,
 				!fiq->connected || request_pending(fiq));
 	if (err)
 		goto err_unlock;
@@ -1886,6 +1889,12 @@ static ssize_t fuse_dev_do_write(struct fuse_dev *fud,
 		cs->move_pages = 0;
 
 	err = copy_out_args(cs, &req->out, nbytes);
+	if (req->in.h.opcode == FUSE_CANONICAL_PATH) {
+		char *path = (char *)req->out.args[0].value;
+
+		path[req->out.args[0].size - 1] = 0;
+		req->out.h.error = kern_path(path, 0, req->canonical_path);
+	}
 	fuse_copy_finish(cs);
 
 	spin_lock(&fpq->lock);

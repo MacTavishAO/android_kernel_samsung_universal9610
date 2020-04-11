@@ -43,6 +43,10 @@
 #include "internal.h"
 #include "mount.h"
 
+#ifdef CONFIG_RKP_NS_PROT
+u8 ns_prot = 0;
+#endif
+
 /*
  * Usage:
  * dcache->d_inode->i_lock protects:
@@ -3172,7 +3176,11 @@ restart:
 			if (mnt != parent) {
 				dentry = ACCESS_ONCE(mnt->mnt_mountpoint);
 				mnt = parent;
+#ifdef CONFIG_RKP_NS_PROT
+				vfsmnt = mnt->mnt;
+#else
 				vfsmnt = &mnt->mnt;
+#endif
 				continue;
 			}
 			if (!error)
@@ -3263,6 +3271,7 @@ char *d_absolute_path(const struct path *path,
 		return ERR_PTR(error);
 	return res;
 }
+EXPORT_SYMBOL(d_absolute_path);
 
 /*
  * same as __d_path but appends "(deleted)" for unlinked files.
@@ -3675,8 +3684,10 @@ void __init vfs_caches_init_early(void)
 	for (i = 0; i < ARRAY_SIZE(in_lookup_hashtable); i++)
 		INIT_HLIST_BL_HEAD(&in_lookup_hashtable[i]);
 
+	set_memsize_kernel_type(MEMSIZE_KERNEL_VFSHASH);
 	dcache_init_early();
 	inode_init_early();
+	set_memsize_kernel_type(MEMSIZE_KERNEL_OTHERS);
 }
 
 void __init vfs_caches_init(void)
@@ -3691,4 +3702,7 @@ void __init vfs_caches_init(void)
 	mnt_init();
 	bdev_cache_init();
 	chrdev_init();
+#ifdef CONFIG_RKP_NS_PROT
+	ns_prot = 1;
+#endif
 }
