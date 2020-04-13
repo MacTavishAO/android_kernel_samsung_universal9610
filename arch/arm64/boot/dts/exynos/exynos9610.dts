@@ -33,6 +33,7 @@
 	compatible = "samsung,armv8", "samsung,exynos9610";
 	dtb-hw_rev = <0>;
 	dtb-hw_rev_end = <255>;
+	model_info-chip = <9610>;
 
 	interrupt-parent = <&gic>;
 	#address-cells = <2>;
